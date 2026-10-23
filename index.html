@@ -46,9 +46,9 @@ a{color:var(--accent)}
       <div class="row" style="margin:0 0 10px"><span class="label">Room</span><b id="roomCode"></b><button id="copyBtn">Copy invite link</button></div>
       <canvas id="stage" width="1280" height="720"></canvas>
       <div class="row"><span class="label">Layout</span>
-        <button data-mode="speaker" class="on">Active speaker</button>
+        <button data-mode="speaker">Active speaker</button>
         <button data-mode="focus">Speaker + strip</button>
-        <button data-mode="grid">Everyone</button>
+        <button data-mode="grid" class="on">Everyone</button>
       </div>
       <div class="row"><span class="label">In the shot</span><span id="chips" class="row" style="margin:0"></span></div>
       <div class="row">
@@ -61,6 +61,7 @@ a{color:var(--accent)}
       <p class="hint">Whoever presses Record gets their own copy of the cut, using the layout they chose.</p>
     </div>
   </div>
+  <details open class="card"><summary class="label">Connection log (send me a screenshot if something fails)</summary><pre id="log" style="white-space:pre-wrap;font-size:.75rem;margin:8px 0 0;max-height:180px;overflow:auto"></pre></details>
   <div id="hidden"></div>
 </main>
 
@@ -68,7 +69,7 @@ a{color:var(--accent)}
 (function(){
 var $=function(i){return document.getElementById(i)};
 var peer=null, local=null, myName='', code='', isHost=false, hostId='';
-var people={}, included={}, mode='speaker', active=null, lastSwitch=0, members={};
+var people={}, included={}, mode='grid', active=null, lastSwitch=0, members={};
 var ac=null, dest=null, recorder=null, rchunks=[], recStart=0, timer=null;
 var canvas=$('stage'), ctx=canvas.getContext('2d');
 var PFX='vlogsq-';
@@ -78,6 +79,8 @@ try{var q=new URLSearchParams(location.search).get('room'); if(q)$('code').value
 
 function fail(m){$('joinErr').textContent=m}
 function status(m){$('status').textContent=m}
+function log(m){var l=$('log'); l.textContent+=new Date().toLocaleTimeString()+'  '+m+'\n'; l.scrollTop=l.scrollHeight}
+window.addEventListener('error',function(e){log('JS error: '+e.message)});
 var ICE=[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:global.stun.twilio.com:3478'},
  {urls:'turn:openrelay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
  {urls:'turn:openrelay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
@@ -103,9 +106,10 @@ function start(){
   peer.on('error',function(e){
     if(e.type==='unavailable-id'){fail('That room code is already in use. Try again.');return}
     if(e.type==='peer-unavailable'){fail('Room not found. Check the code, and make sure the host still has the page open.');status('');return}
-    status('Connection problem: '+e.type+(e.type==='network'||e.type==='server-error'||e.type==='socket-error'?' (the free signaling server may be down or blocked on this network)':''));
+    log('PeerJS error: '+e.type+' '+(e.message||''));status('Connection problem: '+e.type+(e.type==='network'||e.type==='server-error'||e.type==='socket-error'?' (the free signaling server may be down or blocked on this network)':''));
   });
   peer.on('open',function(id){
+    log('Server connected. My id: '+id);
     $('join').style.display='none'; $('call').style.display='block';
     $('roomCode').textContent=code;
     status(isHost?'Room ready. Share the invite link and wait for friends.':'Connected. Joining room '+code+'…');
@@ -114,16 +118,17 @@ function start(){
     if(!isHost){
       var dc=peer.connect(hostId,{metadata:{name:myName}});
       var t=setTimeout(function(){status('Can’t reach the host. Ask them to keep the page open, or try a different network.')},10000);
-      dc.on('open',function(){clearTimeout(t);status('Joined room. Setting up video…')});
+      dc.on('open',function(){log('Reached host');clearTimeout(t);status('Joined room. Setting up video…')});
       dc.on('error',function(){status('Couldn’t connect to the host.')});
       dc.on('data',function(d){
-        if(d&&d.type==='peers'){d.list.forEach(function(m){callPeer(m.id,m.name)})}
+        if(d&&d.type==='peers'){log('Host says '+d.list.length+' in room');d.list.forEach(function(m){callPeer(m.id,m.name)})}
       });
     }
   });
   // host keeps a member list and tells newcomers who is here
   peer.on('connection',function(dc){
-    dc.on('open',function(){
+    log('Someone is connecting…');
+    dc.on('open',function(){log('Joined: '+((dc.metadata&&dc.metadata.name)||'friend'));
       var list=[{id:peer.id,name:myName}];
       Object.keys(members).forEach(function(id){list.push({id:id,name:members[id]})});
       dc.send({type:'peers',list:list});
@@ -132,7 +137,7 @@ function start(){
     dc.on('close',function(){delete members[dc.peer];drop(dc.peer)});
   });
   peer.on('call',function(call){
-    call.answer(local); hook(call,(call.metadata&&call.metadata.name)||'Friend');
+    log('Incoming call from '+((call.metadata&&call.metadata.name)||'friend'));call.answer(local); hook(call,(call.metadata&&call.metadata.name)||'Friend');
   });
 }
 
@@ -141,10 +146,11 @@ function callPeer(id,name){
   var call=peer.call(id,local,{metadata:{name:myName}}); hook(call,name);
 }
 function hook(call,name){
-  status('Connecting video with '+name+'…');
+  log('Video link with '+name+' starting');status('Connecting video with '+name+'…');
+  try{var pcx=call.peerConnection;if(pcx)pcx.oniceconnectionstatechange=function(){log(name+' ICE: '+pcx.iceConnectionState)}}catch(e){}
   setTimeout(function(){if(!people[call.peer])status('Still connecting to '+name+'. Their network may be blocking video. Try Wi‑Fi instead of mobile data, or a different network.')},15000);
   call.on('stream',function(st){
-    status('');
+    status('');log('Got video from '+name);
     var p=people[call.peer];
     if(p){p.stream=st;p.video.srcObject=st;return}
     addPerson(call.peer,name,st,false);
@@ -216,7 +222,7 @@ function draw(){
   list.forEach(function(p){p.level=p.level*0.8+level(p)*0.2; if(p.level>bl){bl=p.level;best=p}});
   var cur=active&&people[active]&&included[active]?people[active]:null;
   if(!cur){active=(best||list[0]).id;lastSwitch=now}
-  else if(best&&best.id!==cur.id&&bl>0.02&&bl>cur.level*1.6&&now-lastSwitch>1200){active=best.id;lastSwitch=now}
+  else if(best&&best.id!==cur.id&&bl>0.01&&bl>cur.level*1.4&&now-lastSwitch>1200){active=best.id;lastSwitch=now}
   var sp=people[active]||list[0];
   if(mode==='speaker'||list.length===1){cover(sp,0,0,W,H);return}
   if(mode==='focus'){
