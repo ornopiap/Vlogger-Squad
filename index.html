@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vlog Squad Live</title>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--bg:#faf7f2;--card:#fff;--text:#1d1b20;--mute:#6f6a75;--accent:#ff4d6d;--line:#e8e2d9}
+@media (prefers-color-scheme:dark){:root{--bg:#141218;--card:#1f1c25;--text:#f3eff7;--mute:#a49dad;--accent:#ff6b88;--line:#332f3b;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.4;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:900px;margin:0 auto;padding:14px}
+h1{font-size:1.5rem;margin:4px 0}
+.sub,.hint{color:var(--mute);font-size:.9rem;margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px}
+canvas{width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;display:block}
+button{font:inherit;border:1px solid var(--line);border-radius:999px;padding:8px 14px;background:transparent;color:var(--text);font-weight:600;cursor:pointer}
+button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+.label{color:var(--mute);font-size:.85rem}
+input[type=text]{font:inherit;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--text);width:100%;margin:6px 0}
+.rec{color:var(--accent);font-weight:700}
+.err{color:var(--accent);font-size:.9rem;margin-top:8px}
+#hidden{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>🎬 Vlog Squad Live</h1>
+  <p class="sub">Join the call, the app auto-cuts to whoever is talking, and you record the final video.</p>
+
+  <p class="hint" id="status"></p>
+
+  <div class="card" id="join">
+    <input type="text" id="name" placeholder="Your name" maxlength="24">
+    <input type="text" id="code" placeholder="Room code (leave empty to create a new room)" maxlength="12">
+    <div class="row"><button id="joinBtn" class="on">Start camera &amp; go</button></div>
+    <div class="err" id="joinErr"></div>
+    <p class="hint">One person creates a room and shares the code or link. Everyone else enters the code. Use headphones to avoid echo.</p>
+  </div>
+
+  <div id="call" style="display:none">
+    <div class="card">
+      <div class="row" style="margin:0 0 10px"><span class="label">Room</span><b id="roomCode"></b><button id="copyBtn">Copy invite link</button></div>
+      <canvas id="stage" width="1280" height="720"></canvas>
+      <div class="row"><span class="label">Layout</span>
+        <button data-mode="speaker" class="on">Active speaker</button>
+        <button data-mode="focus">Speaker + strip</button>
+        <button data-mode="grid">Everyone</button>
+      </div>
+      <div class="row"><span class="label">In the shot</span><span id="chips" class="row" style="margin:0"></span></div>
+      <div class="row">
+        <button id="micBtn">🎤 Mic on</button>
+        <button id="camBtn">📷 Cam on</button>
+        <button id="recBtn" class="on">● Record vlog</button>
+        <span id="recInfo" class="rec"></span>
+      </div>
+      <div class="err" id="err"></div>
+      <p class="hint">Whoever presses Record gets their own copy of the cut, using the layout they chose.</p>
+    </div>
+  </div>
+  <div id="hidden"></div>
+</main>
+
+<script>
+(function(){
+var $=function(i){return document.getElementById(i)};
+var peer=null, local=null, myName='', code='', isHost=false, hostId='';
+var people={}, included={}, mode='speaker', active=null, lastSwitch=0, members={};
+var ac=null, dest=null, recorder=null, rchunks=[], recStart=0, timer=null;
+var canvas=$('stage'), ctx=canvas.getContext('2d');
+var PFX='vlogsq-';
+
+try{var q=new URLSearchParams(location.search).get('room'); if(q)$('code').value=q;
+    var s=localStorage.getItem('vlogname'); if(s)$('name').value=s}catch(e){}
+
+function fail(m){$('joinErr').textContent=m}
+function status(m){$('status').textContent=m}
+var ICE=[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:global.stun.twilio.com:3478'},
+ {urls:'turn:openrelay.metered.ca:80',username:'openrelayproject',credential:'openrelayproject'},
+ {urls:'turn:openrelay.metered.ca:443',username:'openrelayproject',credential:'openrelayproject'},
+ {urls:'turn:openrelay.metered.ca:443?transport=tcp',username:'openrelayproject',credential:'openrelayproject'}];
+
+$('joinBtn').onclick=async function(){
+  var n=$('name').value.trim(); if(!n){fail('Enter your name first.');return}
+  myName=n; try{localStorage.setItem('vlogname',n)}catch(e){}
+  code=$('code').value.trim().toLowerCase().replace(/[^a-z0-9]/g,'');
+  isHost=!code; if(isHost)code=Math.random().toString(36).slice(2,7);
+  hostId=PFX+code; fail('');
+  try{
+    local=await navigator.mediaDevices.getUserMedia({video:{width:640,height:360},audio:{echoCancellation:true,noiseSuppression:true}});
+  }catch(e){fail('Camera or mic is blocked. Allow access in your browser and make sure the page is on https.');return}
+  ac=new (window.AudioContext||window.webkitAudioContext)(); dest=ac.createMediaStreamDestination();
+  start();
+};
+
+function start(){
+  if(typeof Peer==='undefined'){fail('Could not load the connection library. Check your internet.');return}
+  status('Connecting to the signaling server…');
+  peer=new Peer(isHost?hostId:undefined,{config:{iceServers:ICE}});
+  peer.on('error',function(e){
+    if(e.type==='unavailable-id'){fail('That room code is already in use. Try again.');return}
+    if(e.type==='peer-unavailable'){fail('Room not found. Check the code, and make sure the host still has the page open.');status('');return}
+    status('Connection problem: '+e.type+(e.type==='network'||e.type==='server-error'||e.type==='socket-error'?' (the free signaling server may be down or blocked on this network)':''));
+  });
+  peer.on('open',function(id){
+    $('join').style.display='none'; $('call').style.display='block';
+    $('roomCode').textContent=code;
+    status(isHost?'Room ready. Share the invite link and wait for friends.':'Connected. Joining room '+code+'…');
+    addPerson('me',myName,local,true);
+    setInterval(draw,33);
+    if(!isHost){
+      var dc=peer.connect(hostId,{metadata:{name:myName}});
+      var t=setTimeout(function(){status('Can’t reach the host. Ask them to keep the page open, or try a different network.')},10000);
+      dc.on('open',function(){clearTimeout(t);status('Joined room. Setting up video…')});
+      dc.on('error',function(){status('Couldn’t connect to the host.')});
+      dc.on('data',function(d){
+        if(d&&d.type==='peers'){d.list.forEach(function(m){callPeer(m.id,m.name)})}
+      });
+    }
+  });
+  // host keeps a member list and tells newcomers who is here
+  peer.on('connection',function(dc){
+    dc.on('open',function(){
+      var list=[{id:peer.id,name:myName}];
+      Object.keys(members).forEach(function(id){list.push({id:id,name:members[id]})});
+      dc.send({type:'peers',list:list});
+      members[dc.peer]=(dc.metadata&&dc.metadata.name)||'Friend';
+    });
+    dc.on('close',function(){delete members[dc.peer];drop(dc.peer)});
+  });
+  peer.on('call',function(call){
+    call.answer(local); hook(call,(call.metadata&&call.metadata.name)||'Friend');
+  });
+}
+
+function callPeer(id,name){
+  if(people[id]||id===peer.id)return;
+  var call=peer.call(id,local,{metadata:{name:myName}}); hook(call,name);
+}
+function hook(call,name){
+  status('Connecting video with '+name+'…');
+  setTimeout(function(){if(!people[call.peer])status('Still connecting to '+name+'. Their network may be blocking video. Try Wi‑Fi instead of mobile data, or a different network.')},15000);
+  call.on('stream',function(st){
+    status('');
+    var p=people[call.peer];
+    if(p){p.stream=st;p.video.srcObject=st;return}
+    addPerson(call.peer,name,st,false);
+  });
+  call.on('close',function(){drop(call.peer)});
+  call.on('error',function(){drop(call.peer)});
+}
+
+function addPerson(id,name,stream,isLocal){
+  var v=document.createElement('video'); v.playsInline=true; v.autoplay=true; v.muted=!!isLocal; v.srcObject=stream;
+  $('hidden').appendChild(v); v.play&&v.play().catch(function(){});
+  var p={id:id,name:name,video:v,stream:stream,level:0,local:!!isLocal};
+  if(stream.getAudioTracks().length){
+    var src=ac.createMediaStreamSource(stream), an=ac.createAnalyser(); an.fftSize=512;
+    src.connect(an); src.connect(dest); p.an=an; p.buf=new Uint8Array(an.fftSize);
+  }
+  people[id]=p; included[id]=true; chips();
+}
+function drop(id){
+  var p=people[id]; if(!p||p.local)return;
+  p.video.remove(); delete people[id]; delete included[id]; if(active===id)active=null; chips();
+}
+function level(p){
+  if(!p.an)return 0; p.an.getByteTimeDomainData(p.buf); var s=0;
+  for(var i=0;i<p.buf.length;i++){var x=(p.buf[i]-128)/128; s+=x*x}
+  return Math.sqrt(s/p.buf.length);
+}
+
+function chips(){
+  var c=$('chips'); c.textContent='';
+  Object.keys(people).forEach(function(id){
+    var p=people[id], b=document.createElement('button');
+    b.textContent=(included[id]?'✓ ':'')+p.name+(p.local?' (you)':'');
+    b.className=included[id]?'on':'';
+    b.onclick=function(){included[id]=!included[id]; chips()};
+    c.appendChild(b);
+  });
+}
+document.querySelectorAll('[data-mode]').forEach(function(b){
+  b.onclick=function(){
+    mode=b.dataset.mode;
+    document.querySelectorAll('[data-mode]').forEach(function(x){x.className=x===b?'on':''});
+  };
+});
+$('copyBtn').onclick=function(){
+  var link=location.origin+location.pathname+'?room='+code, b=this;
+  (navigator.clipboard?navigator.clipboard.writeText(link):Promise.reject()).then(function(){b.textContent='Copied!'},function(){prompt('Copy this link:',link)});
+};
+$('micBtn').onclick=function(){var t=local.getAudioTracks()[0]; if(!t)return; t.enabled=!t.enabled; this.textContent=t.enabled?'🎤 Mic on':'🔇 Mic off'};
+$('camBtn').onclick=function(){var t=local.getVideoTracks()[0]; if(!t)return; t.enabled=!t.enabled; this.textContent=t.enabled?'📷 Cam on':'🚫 Cam off'};
+
+function cover(p,x,y,w,h){
+  var v=p.video;
+  ctx.save(); ctx.beginPath(); ctx.rect(x,y,w,h); ctx.clip();
+  if(v.readyState>=2&&v.videoWidth){
+    var r=Math.max(w/v.videoWidth,h/v.videoHeight), dw=v.videoWidth*r, dh=v.videoHeight*r;
+    ctx.drawImage(v,x+(w-dw)/2,y+(h-dh)/2,dw,dh);
+  }else{ctx.fillStyle='#222';ctx.fillRect(x,y,w,h);ctx.fillStyle='#888';ctx.font='bold 48px sans-serif';ctx.textAlign='center';ctx.fillText(p.name.charAt(0).toUpperCase(),x+w/2,y+h/2+16)}
+  ctx.restore();
+  ctx.font='bold 22px sans-serif'; ctx.textAlign='left'; ctx.fillStyle='rgba(0,0,0,.55)';
+  ctx.fillRect(x+10,y+h-40,ctx.measureText(p.name).width+16,30);
+  ctx.fillStyle='#fff'; ctx.fillText(p.name,x+18,y+h-17);
+}
+function draw(){
+  var W=1280,H=720; ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+  var list=Object.keys(people).filter(function(i){return included[i]}).map(function(i){return people[i]});
+  if(!list.length){ctx.fillStyle='#888';ctx.font='28px sans-serif';ctx.textAlign='center';ctx.fillText('Pick at least one person to show',W/2,H/2);return}
+  var best=null,bl=0,now=Date.now();
+  list.forEach(function(p){p.level=p.level*0.8+level(p)*0.2; if(p.level>bl){bl=p.level;best=p}});
+  var cur=active&&people[active]&&included[active]?people[active]:null;
+  if(!cur){active=(best||list[0]).id;lastSwitch=now}
+  else if(best&&best.id!==cur.id&&bl>0.02&&bl>cur.level*1.6&&now-lastSwitch>1200){active=best.id;lastSwitch=now}
+  var sp=people[active]||list[0];
+  if(mode==='speaker'||list.length===1){cover(sp,0,0,W,H);return}
+  if(mode==='focus'){
+    var others=list.filter(function(p){return p!==sp}), sh=170, gap=8, tw=(W-gap*(others.length-1))/others.length;
+    cover(sp,0,0,W,H-sh-gap);
+    others.forEach(function(p,i){cover(p,i*(tw+gap),H-sh,tw,sh)});return;
+  }
+  var n=list.length, cols=Math.ceil(Math.sqrt(n)), rows=Math.ceil(n/cols), g=8, cw=(W-g*(cols-1))/cols, ch=(H-g*(rows-1))/rows;
+  list.forEach(function(p,i){cover(p,(i%cols)*(cw+g),Math.floor(i/cols)*(ch+g),cw,ch)});
+}
+
+$('recBtn').onclick=function(){
+  var btn=this; $('err').textContent='';
+  if(recorder&&recorder.state==='recording'){recorder.stop();return}
+  try{
+    ac.resume&&ac.resume();
+    var mixed=new MediaStream(canvas.captureStream(30).getVideoTracks().concat(dest.stream.getAudioTracks()));
+    var mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')?'video/webm;codecs=vp8,opus':'video/webm';
+    recorder=new MediaRecorder(mixed,{mimeType:mime,videoBitsPerSecond:2500000});
+    rchunks=[]; recorder.ondataavailable=function(e){if(e.data.size)rchunks.push(e.data)};
+    recorder.onstop=function(){
+      clearInterval(timer); $('recInfo').textContent=''; btn.textContent='● Record vlog';
+      var a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(rchunks,{type:'video/webm'}));
+      a.download='vlog-'+new Date().toISOString().slice(0,10)+'.webm'; document.body.appendChild(a); a.click(); a.remove();
+    };
+    recorder.start(1000); recStart=Date.now(); btn.textContent='■ Stop & save';
+    timer=setInterval(function(){var s=Math.floor((Date.now()-recStart)/1000);$('recInfo').textContent='● REC '+Math.floor(s/60)+':'+String(s%60).padStart(2,'0')},500);
+  }catch(e){$('err').textContent='Recording isn’t supported in this browser. Try Chrome, Edge or Firefox.'}
+};
+})();
+</script>
+</body>
+</html>
